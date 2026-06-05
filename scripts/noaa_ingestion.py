@@ -1,8 +1,14 @@
-# Importing necessary libraries for HTTP requests and timezone-aware dates
+# Importing required libraries for API requests, dates, database connections, and secure variables
 import requests
 from datetime import datetime, timedelta, timezone
+import psycopg2
+import os
+from dotenv import load_dotenv
 
-# Setting up a generic function to retrieve various NOAA data products
+# Loading the hidden credentials from our .env file into Python's memory
+load_dotenv()
+
+# Setting up the generic function to retrieve various NOAA data products
 def fetch_noaa_data(station_id, begin_date, end_date, product, datum="STND"):
     
     # Defining the base CO-OPS API endpoint URL
@@ -26,54 +32,110 @@ def fetch_noaa_data(station_id, begin_date, end_date, product, datum="STND"):
 
     # Checking for a successful HTTP response code
     if response.status_code == 200:
-        
-        # Parsing the JSON payload from the response
         data = response.json()
-
-        # Verifying the presence of the data or predictions array in the payload
         if 'data' in data:
             return data['data']
-        elif 'predictions' in data: # Tides return as 'predictions' instead of 'data'
+        elif 'predictions' in data: 
             return data['predictions']
         else:
-            # Printing an error message if the API returns an unexpected structure
-            print(f"Encountering an API error for {product}: {data.get('error', 'Unknown error')}")
             return None
     else:
-        # Printing a connection error for failed HTTP requests
-        print(f"Failing to connect for {product}, status code: {response.status_code}")
         return None
+
+# Setting up the function to push environmental weather data to PostgreSQL
+def save_environmental_data(temp_data, pressure_data):
+    
+    # Connecting to the PostgreSQL database using our .env variables
+    conn = psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        port=os.getenv("DB_PORT", "5432")
+    )
+    
+    # Opening a cursor to execute SQL commands
+    cursor = conn.cursor()
+
+    # Processing and saving temperature records
+    if temp_data:
+        print("Saving water temperature records to database...")
+        for record in temp_data:
+            # Executing an UPSERT command to insert or update the row
+            cursor.execute("""
+                INSERT INTO environmental_conditions (reading_time, water_temperature_f)
+                VALUES (%s, %s)
+                ON CONFLICT (reading_time) 
+                DO UPDATE SET water_temperature_f = EXCLUDED.water_temperature_f;
+            """, (record['t'], record['v']))
+
+    # Processing and saving barometric pressure records
+    if pressure_data:
+        print("Saving barometric pressure records to database...")
+        for record in pressure_data:
+            # Executing an UPSERT command to merge pressure into the existing timestamp row
+            cursor.execute("""
+                INSERT INTO environmental_conditions (reading_time, barometric_pressure_mb)
+                VALUES (%s, %s)
+                ON CONFLICT (reading_time) 
+                DO UPDATE SET barometric_pressure_mb = EXCLUDED.barometric_pressure_mb;
+            """, (record['t'], record['v']))
+
+    # Committing the changes permanently to the database
+    conn.commit()
+    
+    # Closing the cursor and connection safely
+    cursor.close()
+    conn.close()
+
+# Setting up the function to push tide prediction data to PostgreSQL
+def save_tide_data(tide_data):
+    
+    # Connecting to the PostgreSQL database
+    conn = psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        port=os.getenv("DB_PORT", "5432")
+    )
+    cursor = conn.cursor()
+
+    if tide_data:
+        print("Saving tide predictions to database...")
+        for record in tide_data:
+            # Executing an UPSERT for tide levels
+            cursor.execute("""
+                INSERT INTO tide_predictions (prediction_time, water_level_ft)
+                VALUES (%s, %s)
+                ON CONFLICT (prediction_time) 
+                DO UPDATE SET water_level_ft = EXCLUDED.water_level_ft;
+            """, (record['t'], record['v']))
+
+    # Committing and closing
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 # Executing the script logic when run directly
 if __name__ == "__main__":
     
-    # Defining the target Galveston Pleasure Pier station ID
     GALVESTON_STATION = "8771341"
-
-    # Calculating the date range using the modern, timezone-aware method (fixes deprecation warning)
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=1)
     
-    # Formatting dates to YYYYMMDD strings as required by the NOAA API
     begin_str = start_time.strftime("%Y%m%d")
     end_str = end_time.strftime("%Y%m%d")
 
     print(f"Pulling environmental data from {begin_str} to {end_str}...\n")
 
-    # 1. Fetching Water Temperature
-    print("--- Fetching Water Temperature ---")
+    # 1. Fetching the raw data from NOAA
     temp_data = fetch_noaa_data(GALVESTON_STATION, begin_str, end_str, "water_temperature")
-    if temp_data:
-        print(f"Success! First record: Time {temp_data[0]['t']} | Temp {temp_data[0]['v']} °F")
-
-    # 2. Fetching Barometric Pressure
-    print("\n--- Fetching Barometric Pressure ---")
     pressure_data = fetch_noaa_data(GALVESTON_STATION, begin_str, end_str, "air_pressure")
-    if pressure_data:
-        print(f"Success! First record: Time {pressure_data[0]['t']} | Pressure {pressure_data[0]['v']} mb")
-
-    # 3. Fetching Tide Predictions (requires MLLW datum)
-    print("\n--- Fetching Tide Predictions ---")
     tide_data = fetch_noaa_data(GALVESTON_STATION, begin_str, end_str, "predictions", datum="MLLW")
-    if tide_data:
-        print(f"Success! First record: Time {tide_data[0]['t']} | Level {tide_data[0]['v']} ft")
+
+    # 2. Pushing the data into PostgreSQL
+    save_environmental_data(temp_data, pressure_data)
+    save_tide_data(tide_data)
+    
+    print("\nData pipeline execution completing successfully!")
