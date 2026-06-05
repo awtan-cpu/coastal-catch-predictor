@@ -9,3 +9,4 @@ __pycache__/
 # Ignoring operating system hidden files
 .DS_Store
 Thumbs.db
+.Rproj.user
