@@ -1,0 +1,11 @@
+# Ignoring local python environment caches
+__pycache__/
+*.pyc
+
+# Ignoring local databases holding raw data
+*.sqlite
+*.db
+
+# Ignoring operating system hidden files
+.DS_Store
+Thumbs.db
